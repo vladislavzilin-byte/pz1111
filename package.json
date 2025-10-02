@@ -1,6 +1,6 @@
 {
-  "name": "medexpress-demo",
-  "version": "1.0.1",
+  "name": "medexpress-account-demo",
+  "version": "1.1.0",
   "private": true,
   "scripts": {
     "dev": "vite",
