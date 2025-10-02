@@ -1,16 +1,21 @@
-# MedShop (Latest)
+# MedShop — Fullstack (Client + Server)
 
-This package matches the user's latest update:
-- Quantity controls per product and in cart
-- Registration/profile with full address, city, country, postcode, email, phone
-- Email login + demo verification code via localStorage
+- Client: Vite + React (registration with full address fields, login, verification code input).
+- Server: Node + Express + nodemailer (sends code to email, verifies it).
 
-## Run
+## Quick start
+### Server
 ```bash
+cd server
+cp .env.example .env  # fill SMTP_*
 npm install
 npm run dev
 ```
 
-## Notes
-- Email verification is DEMO only and shows the code in the browser console.
-- For real emails, add a backend endpoint to send and verify codes.
+### Client
+```bash
+cd client
+npm install
+# optionally set VITE_API_BASE in .env to your server URL (default: http://localhost:3001/api)
+npm run dev
+```
