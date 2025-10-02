@@ -1,21 +1,18 @@
-# MedShop — Fullstack (Client + Server)
+# MedExpress — AliExpress-style Demo
 
-- Client: Vite + React (registration with full address fields, login, verification code input).
-- Server: Node + Express + nodemailer (sends code to email, verifies it).
+AliExpress-like layout with the same features:
+- 3 products (Ivermectin, Fenbendazole, Mebendazole)
+- Quantity selectors in catalog and cart
+- Simple registration (first/last name, address, city, country, postcode, email, phone)
+- Login with email + 6-digit code (demo: saved to localStorage and printed to console)
+- Checkout buttons for PayPal / Paysera (demo only)
 
-## Quick start
-### Server
+## Run
 ```bash
-cd server
-cp .env.example .env  # fill SMTP_*
 npm install
 npm run dev
 ```
 
-### Client
-```bash
-cd client
-npm install
-# optionally set VITE_API_BASE in .env to your server URL (default: http://localhost:3001/api)
-npm run dev
-```
+## Notes
+- Email verification is local-only. For real emails, add the server from the previous package (Express + nodemailer).
+- Replace images/prices with your own.
