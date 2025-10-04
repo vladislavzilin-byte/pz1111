@@ -1,92 +1,135 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import cookieParser from "cookie-parser";
+import jwt from "jsonwebtoken";
+import { v4 as uuidv4 } from "uuid";
 import nodemailer from "nodemailer";
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
+const ORIGIN = process.env.ORIGIN || "http://localhost:5173";
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
+const ACCESS_TTL_MIN = parseInt(process.env.ACCESS_TTL_MIN || "15");
+const REFRESH_TTL_DAYS = parseInt(process.env.REFRESH_TTL_DAYS || "7");
 
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({ origin: ORIGIN, credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
 
-// In-memory store for verification codes (use Redis/DB in production)
-const codes = new Map(); // key: email, value: { code, ts }
-const CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const RATE_LIMIT = new Map(); // key: ip|email, value: [timestamps]
+const codes = new Map();
+const refreshStore = new Map();
+const rate = new Map();
 
-function rateLimited(key, limit = 5, windowMs = 15 * 60 * 1000) {
+function rateLimited(key, limit=5, windowMs=10*60*1000){
   const now = Date.now();
-  const arr = RATE_LIMIT.get(key) || [];
+  const arr = rate.get(key) || [];
   const recent = arr.filter(t => now - t < windowMs);
   recent.push(now);
-  RATE_LIMIT.set(key, recent);
+  rate.set(key, recent);
   return recent.length > limit;
 }
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: String(process.env.SMTP_SECURE || "false") === "true",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+function signAccess(email){ return jwt.sign({ sub: email, typ: "access" }, JWT_SECRET, { expiresIn: `${ACCESS_TTL_MIN}m` }); }
+function signRefresh(email){
+  const jti = uuidv4();
+  const exp = Date.now() + REFRESH_TTL_DAYS*24*60*60*1000;
+  refreshStore.set(jti, { email, exp });
+  return jwt.sign({ sub: email, jti, typ: "refresh" }, JWT_SECRET, { expiresIn: `${REFRESH_TTL_DAYS}d` });
+}
+function clearRefresh(jti){ refreshStore.delete(jti); }
 
-function generateCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+function setAuthCookies(res, email){
+  const access = signAccess(email);
+  const refresh = signRefresh(email);
+  const secure = false;
+  res.cookie("access_token", access, { httpOnly: true, sameSite: "lax", secure, maxAge: ACCESS_TTL_MIN*60*1000, path: "/" });
+  res.cookie("refresh_token", refresh, { httpOnly: true, sameSite: "lax", secure, maxAge: REFRESH_TTL_DAYS*24*60*60*1000, path: "/api/auth/refresh" });
+  const csrf = uuidv4();
+  res.cookie("csrf_token", csrf, { httpOnly: false, sameSite: "lax", secure, maxAge: REFRESH_TTL_DAYS*24*60*60*1000, path: "/" });
+  return { access, refresh, csrf };
 }
 
-app.post("/api/send-code", async (req, res) => {
+function requireAuth(req, res, next){
+  const token = req.cookies["access_token"];
+  if(!token) return res.status(401).json({ ok: false });
+  try{
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload.sub;
+    next();
+  }catch(e){ return res.status(401).json({ ok:false }); }
+}
+
+const hasSMTP = !!process.env.SMTP_HOST && !!process.env.SMTP_USER;
+const transporter = hasSMTP ? nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: String(process.env.SMTP_SECURE||"false")==="true",
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+}) : null;
+
+function genCode(){ return Math.floor(100000 + Math.random()*900000).toString(); }
+
+app.post("/api/auth/send-code", async (req, res) => {
   const { email } = req.body || {};
-  const ip = req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.socket.remoteAddress || "unknown";
-
-  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-    return res.status(400).json({ ok: false, error: "Invalid email" });
-  }
-  if (rateLimited(`${ip}|send`, 10, 10 * 60 * 1000) || rateLimited(`${email}|send`, 5, 15 * 60 * 1000)) {
-    return res.status(429).json({ ok: false, error: "Too many requests" });
-  }
-
-  const code = generateCode();
+  if(!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok:false, error:"invalid email" });
+  if(rateLimited(`${email}|send`, 5, 10*60*1000)) return res.status(429).json({ ok:false, error:"too many requests" });
+  const code = genCode();
   codes.set(email, { code, ts: Date.now() });
-
-  try {
-    const info = await transporter.sendMail({
-      from: process.env.FROM_EMAIL || "noreply@example.com",
-      to: email,
-      subject: "Ваш код подтверждения",
-      text: `Ваш код: ${code}. Действителен 15 минут.`,
-      html: `<p>Ваш код: <b>${code}</b></p><p>Код действителен 15 минут.</p>`,
-    });
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("Email error:", e);
-    return res.status(500).json({ ok: false, error: "Email send failed" });
+  if(transporter){
+    try{
+      await transporter.sendMail({
+        from: process.env.FROM_EMAIL || "noreply@medexpress.demo",
+        to: email,
+        subject: "Your MedExpress verification code",
+        text: `Your code: ${code} (valid 15 minutes)`,
+        html: `<p>Your code: <b>${code}</b></p><p>Valid 15 minutes.</p>`
+      });
+    }catch(e){ console.error("SMTP error:", e.message); }
   }
+  res.json({ ok:true, demoCode: code });
 });
 
-app.post("/api/verify-code", (req, res) => {
+app.post("/api/auth/verify", (req, res) => {
   const { email, code } = req.body || {};
-  const ip = req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.socket.remoteAddress || "unknown";
-
-  if (!email || !code) return res.status(400).json({ ok: false, error: "Missing email or code" });
-  if (rateLimited(`${ip}|verify`, 20, 10 * 60 * 1000) || rateLimited(`${email}|verify`, 20, 10 * 60 * 1000)) {
-    return res.status(429).json({ ok: false, error: "Too many attempts" });
-  }
-
   const entry = codes.get(email);
-  if (!entry) return res.json({ ok: false });
-  const expired = Date.now() - entry.ts > CODE_TTL_MS;
-  const match = entry.code === code;
-  if (!expired && match) {
-    codes.delete(email);
-    return res.json({ ok: true });
-  }
-  return res.json({ ok: false });
+  if(!entry) return res.json({ ok:false });
+  const valid = entry.code === code && (Date.now()-entry.ts) < 15*60*1000;
+  if(!valid) return res.json({ ok:false });
+  codes.delete(email);
+  setAuthCookies(res, email);
+  res.json({ ok:true });
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.post("/api/auth/refresh", (req,res) => {
+  const token = req.cookies["refresh_token"];
+  if(!token) return res.status(401).json({ ok:false });
+  try{
+    const payload = jwt.verify(token, JWT_SECRET);
+    const { jti, sub } = payload;
+    const rec = refreshStore.get(jti);
+    if(!rec || rec.email !== sub || rec.exp < Date.now()) return res.status(401).json({ ok:false });
+    clearRefresh(jti);
+    setAuthCookies(res, sub);
+    res.json({ ok:true });
+  }catch(e){ return res.status(401).json({ ok:false }); }
+});
 
-app.listen(PORT, () => console.log("Server listening on", PORT));
+app.post("/api/auth/logout", (req, res) => {
+  const token = req.cookies["refresh_token"];
+  if(token){
+    try{
+      const payload = jwt.verify(token, JWT_SECRET);
+      if(payload?.jti) clearRefresh(payload.jti);
+    }catch{}
+  }
+  res.clearCookie("access_token", { path:"/" });
+  res.clearCookie("refresh_token", { path:"/api/auth/refresh" });
+  res.clearCookie("csrf_token", { path:"/" });
+  res.json({ ok:true });
+});
+
+app.get("/api/me", requireAuth, (req, res) => { res.json({ ok:true, email: req.user }); });
+
+app.listen(PORT, () => console.log("Auth server listening on", PORT));

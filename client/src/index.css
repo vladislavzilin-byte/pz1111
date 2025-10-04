@@ -1,5 +1,5 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
 html, body, #root { height: 100%; }
+.ali-badge { background: linear-gradient(90deg, #ff6a00, #ff4747); color:white; }
